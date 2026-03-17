@@ -88,11 +88,22 @@ struct thread
     char name[16];                      /**< Name (for debugging purposes). */
     uint8_t *stack;                     /**< Saved stack pointer. */
     int priority;                       /**< Priority. */
+    int original_priority;              // original priority before donation // 
+  
     struct list_elem allelem;           /**< List element for all threads list. */
-
+    
+    /* Alarm clock (task 1) */
+    int64_t wakeup_tick;                // Tick at which thread should wake up //
+    struct list_elem sleep_elem;        // list element for sleep list//
+    
+    /* Priority donation (task 3) */
+    struct list donors;              // List of threads that donated priority //
+    struct list_elem donor_elem;     // element form donor list //
+    struct lock *waiting_lock;       // Lock this thread is waiting for //
+    
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /**< List element. */
-
+    
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /**< Page directory. */
