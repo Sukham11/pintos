@@ -17,6 +17,7 @@
 #include "threads/palloc.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "devices/timer.h"
 
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
@@ -29,6 +30,7 @@ tid_t
 process_execute (const char *file_name) 
 {
   char *fn_copy;
+  char *fn_parse;
   tid_t tid;
 
   /* Make a copy of FILE_NAME.
@@ -38,10 +40,23 @@ process_execute (const char *file_name)
     return TID_ERROR;
   strlcpy (fn_copy, file_name, PGSIZE);
 
+  fn_parse = palloc_get_page(0);
+  if (fn_parse == NULL)
+  {
+    palloc_free_page(fn_copy);
+    return TID_ERROR;
+  }
+
+  strlcpy(fn_parse, file_name, PGSIZE);
+
+  char *save_ptr;
+  char*prog_name = strtok_r(fn_parse, " ", &save_ptr);
+
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  tid = thread_create (prog_name, PRI_DEFAULT, start_process, fn_copy);
   if (tid == TID_ERROR)
     palloc_free_page (fn_copy); 
+  palloc_free_page(fn_parse);
   return tid;
 }
 
@@ -53,6 +68,8 @@ start_process (void *file_name_)
   char *file_name = file_name_;
   struct intr_frame if_;
   bool success;
+  /* set default exit status to -1 in case of failure */
+  thread_current()->exit_status = -1;
 
   /* Initialize interrupt frame and load executable. */
   memset (&if_, 0, sizeof if_);
@@ -87,7 +104,9 @@ start_process (void *file_name_)
    does nothing. */
 int
 process_wait (tid_t child_tid UNUSED) 
-{
+  {
+  /* Wait for child process to finish before parent exits. */
+  timer_sleep (200);
   return -1;
 }
 
@@ -98,6 +117,11 @@ process_exit (void)
   struct thread *cur = thread_current ();
   uint32_t *pd;
 
+  /* Print exit message for user processes only */
+  if (cur->pagedir != NULL) {
+    printf("%s: exit(%d)\n", cur->name, cur->exit_status);
+  }
+   
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
   pd = cur->pagedir;
@@ -131,7 +155,7 @@ process_activate (void)
      interrupts. */
   tss_update ();
 }
-
+
 /** We load ELF binaries.  The following definitions are taken
    from the ELF specification, [ELF1], more-or-less verbatim.  */
 
@@ -195,7 +219,7 @@ struct Elf32_Phdr
 #define PF_W 2          /**< Writable. */
 #define PF_R 4          /**< Readable. */
 
-static bool setup_stack (void **esp);
+static bool setup_stack (void **esp, const char *cmdline);
 static bool validate_segment (const struct Elf32_Phdr *, struct file *);
 static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
                           uint32_t read_bytes, uint32_t zero_bytes,
@@ -221,8 +245,19 @@ load (const char *file_name, void (**eip) (void), void **esp)
     goto done;
   process_activate ();
 
+  char *fn_copy = palloc_get_page(0);
+  if (fn_copy == NULL)
+    goto done;
+
+  strlcpy(fn_copy, file_name, PGSIZE);
+
+  char *save_ptr;
+  char *prog_name = strtok_r(fn_copy, " ", &save_ptr);
+
   /* Open executable file. */
-  file = filesys_open (file_name);
+  file = filesys_open (prog_name);
+  palloc_free_page(fn_copy);
+
   if (file == NULL) 
     {
       printf ("load: %s: open failed\n", file_name);
@@ -302,7 +337,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
     }
 
   /* Set up stack. */
-  if (!setup_stack (esp))
+  if (!setup_stack (esp, file_name))
     goto done;
 
   /* Start address. */
@@ -315,7 +350,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
   file_close (file);
   return success;
 }
-
+
 /** load() helpers. */
 
 static bool install_page (void *upage, void *kpage, bool writable);
@@ -427,22 +462,84 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 /** Create a minimal stack by mapping a zeroed page at the top of
    user virtual memory. */
 static bool
-setup_stack (void **esp) 
+setup_stack (void **esp, const char *cmdline) 
 {
   uint8_t *kpage;
   bool success = false;
 
   kpage = palloc_get_page (PAL_USER | PAL_ZERO);
-  if (kpage != NULL) 
-    {
-      success = install_page (((uint8_t *) PHYS_BASE) - PGSIZE, kpage, true);
-      if (success)
-        *esp = PHYS_BASE;
-      else
-        palloc_free_page (kpage);
-    }
-  return success;
+  if (kpage == NULL) 
+     return false;
+
+  success = install_page (((uint8_t *) PHYS_BASE) - PGSIZE, kpage, true);
+  if (!success){
+    palloc_free_page (kpage);
+    return false;
+  }
+  *esp = PHYS_BASE;
+      
+  /* parse arguments */
+
+  char *cmd_copy = palloc_get_page(0);
+  if (cmd_copy == NULL)
+     return false;
+
+  strlcpy(cmd_copy, cmdline, PGSIZE);
+
+  char *argv[32];
+  int argc = 0;
+
+  char *token, *save_ptr;
+  for (token = strtok_r(cmd_copy, " ", &save_ptr);
+      token != NULL;
+      token = strtok_r(NULL, " ", &save_ptr))
+  
+    argv[argc++] = token;
+  
+
+  /* push arguments strings */
+  char *arg_addr[32];
+  for (int i = argc -1; i >= 0; i--){
+    int len = strlen(argv[i]) + 1;
+    *esp -= len;
+    memcpy(*esp, argv[i], len );
+    arg_addr[i] = (char *) *esp;
+  }
+
+  /* word align */
+
+  while ((uintptr_t)*esp % 4 != 0) {
+    *esp -= 1;
+    *(uint8_t *)(*esp) = 0;
+  }
+     
+  /* push null */
+  *esp -= sizeof(char *);
+  *(char **)(*esp) = NULL;
+
+  /* push argv[i] */
+  for (int i = argc - 1; i >= 0; i--){
+    *esp -= sizeof(char *);
+    *(char **)(*esp) = arg_addr[i];
+  }
+
+  /* push argv */
+  char **argv0_addr = (char **) *esp;
+  *esp -= sizeof (char **);
+  *(char ***) *esp = argv0_addr;
+
+  /*push argc */
+  *esp -= sizeof (int);
+  *(int *) (*esp) = argc;
+
+  /* push fake return address */
+  *esp -= sizeof(void *);
+  *(void **)(*esp) = NULL;
+
+  palloc_free_page (cmd_copy);
+  return true;
 }
+
 
 /** Adds a mapping from user virtual address UPAGE to kernel
    virtual address KPAGE to the page table.

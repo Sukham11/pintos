@@ -27,7 +27,7 @@ struct list ready_list;
 
 /** List of all processes.  Processes are added to this list
    when they are first scheduled and removed when they exit. */
-static struct list all_list;
+struct list all_list;
 
 
 /** Idle thread. */
@@ -514,6 +514,13 @@ init_thread (struct thread *t, const char *name, int priority)
   t->original_priority = priority;
   list_init(&t->donors);
   t->waiting_lock = NULL;
+#ifdef USERPROG
+  /* Default exit status is -1 (killed by kernel).
+     Will be overwritten by syscall_exit() if process exits normally. */
+  t->exit_status = -1;
+  
+#endif
+
   t->magic = THREAD_MAGIC;
 
   old_level = intr_disable ();
