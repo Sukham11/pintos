@@ -518,7 +518,6 @@ init_thread (struct thread *t, const char *name, int priority)
   /* Default exit status is -1 (killed by kernel).
      Will be overwritten by syscall_exit() if process exits normally. */
   t->exit_status = -1;
-  
 #endif
 
   t->magic = THREAD_MAGIC;
